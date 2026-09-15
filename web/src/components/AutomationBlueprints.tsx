@@ -12,6 +12,7 @@ import { Toast } from "@nous-research/ui/ui/components/toast";
 import { api } from "@/lib/api";
 import type { AutomationBlueprint, AutomationBlueprintField } from "@/lib/api";
 import { cn, themedBody } from "@/lib/utils";
+import { errorMessage } from "@/lib/api-error";
 
 interface AutomationBlueprintsProps {
   profile: string;
@@ -149,8 +150,11 @@ function BlueprintCard({
               </p>
             ) : null}
             <div className="flex items-center gap-2">
-              <Button onClick={() => void submit()} disabled={submitting}>
-                {submitting ? <Spinner className="h-4 w-4" /> : <Clock className="h-4 w-4" />}
+              <Button
+                onClick={() => void submit()}
+                disabled={submitting}
+                prefix={submitting ? <Spinner /> : <Clock />}
+              >
                 Schedule it
               </Button>
             </div>
@@ -180,7 +184,7 @@ export function AutomationBlueprints({ profile, onCreated }: AutomationBlueprint
         if (!cancelled) setBlueprints(r.blueprints);
       })
       .catch((e) => {
-        if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e));
+        if (!cancelled) setLoadError(errorMessage(e));
       });
     return () => {
       cancelled = true;
