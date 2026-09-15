@@ -741,6 +741,12 @@ class SessionStore:
                 with open(sessions_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     for key, entry_data in data.items():
+                        # Skip metadata/documentation keys (e.g. "_README") and
+                        # any non-dict value.  A stray string entry here would
+                        # otherwise raise AttributeError from from_dict's
+                        # .get("platform") and abort the whole index load.
+                        if not isinstance(entry_data, dict):
+                            continue
                         try:
                             self._entries[key] = SessionEntry.from_dict(entry_data)
                         except (ValueError, KeyError):

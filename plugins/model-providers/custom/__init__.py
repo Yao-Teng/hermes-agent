@@ -22,6 +22,9 @@ class CustomProfile(ProviderProfile):
         ollama_num_ctx: int | None = None,
         **ctx: Any,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
+        import logging as _logging
+        _logging.getLogger("CustomProfile").debug("build_api_kwargs_extras: ollama_num_ctx=%r reasoning_config=%r", ollama_num_ctx, reasoning_config)
+
         extra_body: dict[str, Any] = {}
 
         # Ollama context window
@@ -37,6 +40,7 @@ class CustomProfile(ProviderProfile):
             if _effort == "none" or _enabled is False:
                 extra_body["think"] = False
 
+        _logging.getLogger("CustomProfile").info("build_api_kwargs_extras: ollama_num_ctx=%r -> extra_body=%r", ollama_num_ctx, extra_body)
         return extra_body, {}
 
     def fetch_models(

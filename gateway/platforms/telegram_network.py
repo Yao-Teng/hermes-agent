@@ -49,6 +49,76 @@ def _resolve_proxy_url(target_hosts=None) -> str | None:
     return resolve_proxy_url("TELEGRAM_PROXY", target_hosts=target_hosts)
 
 
+class CurlCffiImpersonateTransport(httpx.AsyncBaseTransport):
+    """httpx-compatible transport backed by curl_cffi's browser impersonation.
+
+    Some networks (e.g. GFW-style TLS fingerprint filtering) drop connections
+    that use Python/OpenSSL's default TLS fingerprint while letting real
+    browsers through. This transport routes every request through
+    ``curl_cffi`` with an ``impersonate`` profile (chrome/safari/firefox) so
+    the TLS handshake matches a real browser. Requires the optional
+    ``curl-cffi`` package; if it is missing the transport constructor raises
+    ``ImportError`` and callers fall back to the default stack.
+    """
+
+    def __init__(self, impersonate: str = "chrome", timeout: float = 120.0):
+        from curl_cffi.requests import AsyncSession
+
+        self._impersonate = impersonate
+        self._timeout = timeout
+        self._session = AsyncSession(impersonate=impersonate)
+
+    def _ensure_session(self):
+        # PTB shuts down the HTTPXRequest (and with it our AsyncSession)
+        # after a network error, then resumes polling with a fresh client
+        # that reuses this same transport. curl_cffi's Session raises
+        # SessionClosed once close() has been called, so recreate the
+        # session lazily on the next request instead of leaking the error
+        # into an endless reconnect loop.
+        from curl_cffi.requests.exceptions import SessionClosed
+
+        if getattr(self._session, "_closed", False):
+            raise SessionClosed("Session is closed, cannot send request.")
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        from curl_cffi.requests import AsyncSession
+        from curl_cffi.requests.exceptions import SessionClosed
+
+        try:
+            self._ensure_session()
+            resp = await self._session.request(
+                request.method,
+                str(request.url),
+                headers=dict(request.headers),
+                content=request.content,
+                timeout=self._timeout,
+            )
+        except SessionClosed:
+            self._session = AsyncSession(impersonate=self._impersonate)
+            resp = await self._session.request(
+                request.method,
+                str(request.url),
+                headers=dict(request.headers),
+                content=request.content,
+                timeout=self._timeout,
+            )
+        return httpx.Response(
+            status_code=resp.status_code,
+            headers=dict(resp.headers),
+            content=resp.content,
+            request=request,
+        )
+
+    async def aclose(self) -> None:
+        try:
+            await self._session.close()
+        except Exception:
+            # curl_cffi 0.16's AsyncSession.close() can raise on Windows
+            # asyncio teardown (ctype NoneType) after the loop is closing;
+            # never let transport cleanup crash the gateway shutdown.
+            pass
+
+
 class TelegramFallbackTransport(httpx.AsyncBaseTransport):
     """Retry Telegram Bot API requests via fallback IPs while preserving TLS/SNI.
 

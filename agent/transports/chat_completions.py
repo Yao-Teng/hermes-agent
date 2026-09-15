@@ -594,6 +594,9 @@ class ChatCompletionsTransport(ProviderTransport):
             if extra_body:
                 api_kwargs["extra_body"] = extra_body
 
+        import logging as _logging
+        _logging.getLogger("chat_completions").info("_build_kwargs_from_profile: api_kwargs keys=%s extra_body=%s", list(api_kwargs.keys()), api_kwargs.get("extra_body", {}))
+
         return api_kwargs
 
     def normalize_response(self, response: Any, **kwargs) -> NormalizedResponse:

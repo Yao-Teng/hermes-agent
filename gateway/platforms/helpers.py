@@ -276,3 +276,29 @@ def redact_phone(phone: str) -> str:
     if len(phone) <= 8:
         return phone[:2] + "****" + phone[-2:] if len(phone) > 4 else "****"
     return phone[:4] + "****" + phone[-4:]
+
+
+def convert_table_to_bullets(table_text: str) -> str:
+    """Convert a markdown table into bullet-point format for Discord/Telegram compatibility."""
+    lines = table_text.strip().split('\n')
+    if not lines:
+        return table_text
+    data_lines = [l for l in lines if not re.match(r'^[\s|:\-]+$', l)]
+    if not data_lines:
+        return table_text
+    headers = [h.strip() for h in data_lines[0].split('|') if h.strip()]
+    bullets = []
+    for row in data_lines[1:]:
+        cells = [c.strip() for c in row.split('|') if c.strip()]
+        if not cells:
+            continue
+        if len(cells) == 1:
+            bullets.append(f'  - {cells[0]}')
+        else:
+            parts = []
+            for i, cell in enumerate(cells):
+                label = headers[i] if i < len(headers) else f'col{i}'
+                parts.append(f'{label}: {cell}')
+            bullets.append(f'  - {" | ".join(parts)}')
+    return '\n'.join(bullets) if bullets else table_text
+

@@ -83,6 +83,7 @@ from gateway.platforms.base import (
     utf16_len,
 )
 from gateway.platforms.telegram_network import (
+    CurlCffiImpersonateTransport,
     TelegramFallbackTransport,
     discover_fallback_ips,
     parse_fallback_ip_env,
@@ -1899,6 +1900,8 @@ class TelegramAdapter(BasePlatformAdapter):
             }
 
             disable_fallback = (os.getenv("HERMES_TELEGRAM_DISABLE_FALLBACK_IPS", "").strip().lower() in {"1", "true", "yes", "on"})
+            impersonate = os.getenv("HERMES_TELEGRAM_IMPERSONATE", "").strip().lower()
+
             fallback_ips = self._fallback_ips()
             if not fallback_ips:
                 fallback_ips = await discover_fallback_ips()
@@ -1910,31 +1913,51 @@ class TelegramAdapter(BasePlatformAdapter):
 
             proxy_targets = ["api.telegram.org", *fallback_ips]
             proxy_url = resolve_proxy_url("TELEGRAM_PROXY", target_hosts=proxy_targets)
-            if fallback_ips and not proxy_url and not disable_fallback:
-                logger.info(
-                    "[%s] Telegram fallback IPs active: %s",
-                    self.name,
-                    ", ".join(fallback_ips),
-                )
-                # Keep request/update pools separate to reduce contention during
-                # polling reconnect + bot API bootstrap/delete_webhook calls.
-                request = HTTPXRequest(
-                    **request_kwargs,
-                    httpx_kwargs={"transport": TelegramFallbackTransport(fallback_ips)},
-                )
-                get_updates_request = HTTPXRequest(
-                    **request_kwargs,
-                    httpx_kwargs={"transport": TelegramFallbackTransport(fallback_ips)},
-                )
-            elif proxy_url:
-                logger.info("[%s] Proxy detected; passing explicitly to HTTPXRequest: %s", self.name, proxy_url)
-                request = HTTPXRequest(**request_kwargs, proxy=proxy_url)
-                get_updates_request = HTTPXRequest(**request_kwargs, proxy=proxy_url)
-            else:
-                if disable_fallback:
-                    logger.info("[%s] Telegram fallback-IP transport disabled via env", self.name)
-                request = HTTPXRequest(**request_kwargs)
-                get_updates_request = HTTPXRequest(**request_kwargs)
+
+            request = None
+            get_updates_request = None
+            if impersonate and not proxy_url:
+                try:
+                    logger.info("[%s] Telegram TLS impersonation enabled (profile=%s)", self.name, impersonate)
+                    request = HTTPXRequest(
+                        **request_kwargs,
+                        httpx_kwargs={"transport": CurlCffiImpersonateTransport(impersonate)},
+                    )
+                    get_updates_request = HTTPXRequest(
+                        **request_kwargs,
+                        httpx_kwargs={"transport": CurlCffiImpersonateTransport(impersonate)},
+                    )
+                except ImportError:
+                    logger.warning(
+                        "[%s] HERMES_TELEGRAM_IMPERSONATE set but curl-cffi is not installed; falling back to default transport",
+                        self.name,
+                    )
+            if request is None:
+                if fallback_ips and not proxy_url and not disable_fallback:
+                    logger.info(
+                        "[%s] Telegram fallback IPs active: %s",
+                        self.name,
+                        ", ".join(fallback_ips),
+                    )
+                    # Keep request/update pools separate to reduce contention during
+                    # polling reconnect + bot API bootstrap/delete_webhook calls.
+                    request = HTTPXRequest(
+                        **request_kwargs,
+                        httpx_kwargs={"transport": TelegramFallbackTransport(fallback_ips)},
+                    )
+                    get_updates_request = HTTPXRequest(
+                        **request_kwargs,
+                        httpx_kwargs={"transport": TelegramFallbackTransport(fallback_ips)},
+                    )
+                elif proxy_url:
+                    logger.info("[%s] Proxy detected; passing explicitly to HTTPXRequest: %s", self.name, proxy_url)
+                    request = HTTPXRequest(**request_kwargs, proxy=proxy_url)
+                    get_updates_request = HTTPXRequest(**request_kwargs, proxy=proxy_url)
+                else:
+                    if disable_fallback:
+                        logger.info("[%s] Telegram fallback-IP transport disabled via env", self.name)
+                    request = HTTPXRequest(**request_kwargs)
+                    get_updates_request = HTTPXRequest(**request_kwargs)
 
             builder = builder.request(request).get_updates_request(get_updates_request)
             self._app = builder.build()

@@ -3845,11 +3845,12 @@ class TestRunConversation:
         """When streaming fails after partial delivery, recovered partial content becomes final response."""
         self._setup_agent(agent)
         # Simulate a partial-stream-stub response: content recovered from streaming
-        partial_resp = _mock_response(
-            content="Here is the partial answer that was stream",
-            finish_reason="stop",
+        partial_resp = SimpleNamespace(
+            choices=[SimpleNamespace(delta=SimpleNamespace(content="Here is the partial answer that was stream", tool_calls=None), finish_reason=None)]
         )
-        agent.client.chat.completions.create.return_value = partial_resp
+        def mock_stream():
+            yield partial_resp
+        agent.client.chat.completions.create.return_value = mock_stream()
         # Simulate that streaming had already delivered this text
         agent._current_streamed_assistant_text = "Here is the partial answer that was stream"
         with (
@@ -3862,7 +3863,6 @@ class TestRunConversation:
         assert result["completed"] is True
         assert result["final_response"] == "Here is the partial answer that was stream"
         assert result["api_calls"] == 1  # No retries
-
     def test_partial_stream_recovery_on_empty_stub(self, agent):
         """When stub response has no content but text was streamed, use streamed text."""
         self._setup_agent(agent)

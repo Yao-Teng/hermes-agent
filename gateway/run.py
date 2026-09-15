@@ -153,7 +153,13 @@ def _ensure_windows_gateway_venv_imports() -> None:
     candidates: list[Path] = []
     if os.environ.get("VIRTUAL_ENV"):
         candidates.append(Path(os.environ["VIRTUAL_ENV"]))
-    candidates.append(project_root / "venv")
+    # Common venv directory names — the project may use .venv (hidden)
+    # or venv (visible).  Check both so gateway daemon processes spawned
+    # under uv's global Python can find the correct site-packages.
+    for _name in ("venv", ".venv"):
+        _p = project_root / _name
+        if _p.is_dir():
+            candidates.append(_p)
 
     seen: set[str] = set()
     for venv_dir in candidates:
@@ -15832,7 +15838,7 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
     logger.info("Cron ticker stopped")
 
 
-async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False, verbosity: Optional[int] = 0) -> bool:
+async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False, verbosity: Optional[int] = 0, daemon: bool = False) -> bool:
     """
     Start the gateway and run until interrupted.
     
@@ -15845,12 +15851,91 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         replace: If True, kill any existing gateway instance before starting.
                  Useful for systemd services to avoid restart-loop deadlocks
                  when the previous process hasn't fully exited yet.
+        verbosity: Output verbosity level.
+        daemon: If True, launch the gateway as a detached background process on Windows.
     """
+    # ── Daemon mode (Windows only) ────────────────────────────────────
+    # Launch the gateway as a detached background process, then return.
+    # The child process (with --daemon flag) re-enters start_gateway()
+    # via the main() CLI entry point and continues with normal startup.
+
+    if daemon:
+        if sys.platform != "win32":
+            logger.error("Daemon mode is only supported on Windows.")
+            return False
+
+        import subprocess
+        import sys
+        from pathlib import Path
+        from hermes_constants import get_hermes_home
+
+        # Resolve a truly console-less Python executable for the daemon.
+        # uv-created venvs have a special pythonw.exe launcher that
+        # respawns as console python.exe — defeating CREATE_NO_WINDOW.
+        # _resolve_detached_python() detects this and returns the base
+        # pythonw.exe directly, with extra PYTHONPATH entries so imports
+        # still resolve without the venv launcher.
+        try:
+            from hermes_cli.gateway_windows import _resolve_detached_python
+            python_exe, _venv_dir, _extra_pythonpath = _resolve_detached_python(sys.executable)
+        except ImportError:
+            python_exe = sys.executable
+
+        # Prepare the command to run the gateway as a module
+        args = [python_exe, "-m", "gateway.run"]
+
+        # Serialize config to a temp file for the child process.
+        # The child process owns this file: it will clean it up on exit
+        # by checking whether ``--config`` points to a temp path.
+        _temp_config_path = None
+        if config:
+            import tempfile
+            import yaml
+
+            tf = tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False, encoding='utf-8')
+            yaml.dump(config.to_dict(), tf)
+            _temp_config_path = tf.name
+            tf.close()
+            args.extend(["--config", _temp_config_path])
+
+        if verbosity:
+            args.extend(["--verbose"])
+
+        # Build environment overlay so the child process can find venv
+        # site-packages when running under the base pythonw.exe.
+        _env = os.environ.copy()
+        if _extra_pythonpath:
+            _pythonpath = _extra_pythonpath[:]
+            if _env.get("PYTHONPATH"):
+                _pythonpath.append(_env["PYTHONPATH"])
+            _env["PYTHONPATH"] = os.pathsep.join(_pythonpath)
+
+        try:
+            subprocess.Popen(
+                args,
+                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW,
+                close_fds=True,
+                cwd=str(Path(__file__).resolve().parent.parent),
+                env=_env,
+            )
+            logger.info("Gateway launched in daemon mode (PID detection via lockfile).")
+            return True
+        except Exception as e:
+            logger.error("Failed to launch gateway in daemon mode: %s", e)
+            # Clean up temp config if spawning failed — the child never started.
+            if _temp_config_path and os.path.exists(_temp_config_path):
+                try:
+                    os.unlink(_temp_config_path)
+                except Exception:
+                    pass
+            return False
+
     # ── Duplicate-instance guard ──────────────────────────────────────
     # Prevent two gateways from running under the same HERMES_HOME.
     # The PID file is scoped to HERMES_HOME, so future multi-profile
     # setups (each profile using a distinct HERMES_HOME) will naturally
     # allow concurrent instances without tripping this guard.
+
     from gateway.status import (
         acquire_gateway_runtime_lock,
         get_running_pid,
@@ -15917,11 +16002,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                 except (PermissionError, OSError):
                     pass
                 # Confirm the force-kill actually reaped the process before we
-                # clear its PID file / scoped locks. SIGKILL can fail to take
-                # (e.g. an uninterruptible-sleep or zombie-reaping parent), and
-                # if we blindly clear the metadata and start a fresh instance
-                # we end up with two live gateways fighting over the same
-                # token — the duplicate-gateway failure in #19471.
+                # clear its PID file / scoped locks.
                 if not old_gateway_exited:
                     for _ in range(20):
                         if not _pid_exists(existing_pid):
@@ -15941,22 +16022,15 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                         pass
                     return False
             remove_pid_file()
-            # remove_pid_file() is a no-op when the PID doesn't match.
-            # Force-unlink to cover the old-process-crashed case.
             try:
-                (get_hermes_home() / "gateway.pid").unlink(missing_ok=True)
+                (_hermes_home / "gateway.pid").unlink(missing_ok=True)
             except Exception:
                 pass
-            # Clean up any takeover marker the old process didn't consume
-            # (e.g. SIGKILL'd before its shutdown handler could read it).
             try:
                 from gateway.status import clear_takeover_marker
                 clear_takeover_marker()
             except Exception:
                 pass
-            # Also release all scoped locks left by the old process.
-            # Stopped (Ctrl+Z) processes don't release locks on exit,
-            # leaving stale lock files that block the new gateway from starting.
             try:
                 from gateway.status import release_all_scoped_locks
                 _released = release_all_scoped_locks(
@@ -15968,14 +16042,14 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             except Exception:
                 pass
         else:
-            hermes_home = str(get_hermes_home())
+            hermes_home = str(_hermes_home)
             logger.error(
                 "Another gateway instance is already running (PID %d, HERMES_HOME=%s). "
                 "Use 'hermes gateway restart' to replace it, or 'hermes gateway stop' first.",
                 existing_pid, hermes_home,
             )
             print(
-                f"\n❌ Gateway already running (PID {existing_pid}).\n"
+                f"\n🚫Gateway already running (PID {existing_pid}).\n"
                 f"   Use 'hermes gateway restart' to replace it,\n"
                 f"   or 'hermes gateway stop' to kill it first.\n"
                 f"   Or use 'hermes gateway run --replace' to auto-replace.\n"
@@ -16177,7 +16251,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # Telegram polling, Discord gateway sockets, etc. The loser exits
     # cleanly before touching any external service.
     import atexit
-    from gateway.status import write_pid_file, remove_pid_file, get_running_pid
+    from gateway.status import write_pid_file, remove_pid_file, get_running_pid, acquire_gateway_runtime_lock, release_gateway_runtime_lock
     _current_pid = get_running_pid()
     if _current_pid is not None and _current_pid != os.getpid():
         logger.error(
@@ -16299,25 +16373,41 @@ def main():
         configure_windows_stdio()
     except Exception:
         pass
-
+    
     import argparse
     
     parser = argparse.ArgumentParser(description="Hermes Gateway - Multi-platform messaging")
     parser.add_argument("--config", "-c", help="Path to gateway config file")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
+    parser.add_argument("--daemon", action="store_true", help="Run the gateway in daemon mode (Windows only)")
     
     args = parser.parse_args()
     
-    config = None
+    _temp_config_path = None
     if args.config:
         import yaml
         with open(args.config, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
             config = GatewayConfig.from_dict(data)
+        # If the config path is inside the system temp directory, it was
+        # created by the daemon block in start_gateway() — schedule cleanup.
+        import tempfile as _tempfile
+        _config_resolved = os.path.abspath(args.config)
+        _temp_dir = os.path.abspath(_tempfile.gettempdir())
+        if _config_resolved.startswith(_temp_dir):
+            _temp_config_path = _config_resolved
     
     # Run the gateway - exit with code 1 if no platforms connected,
     # so systemd Restart=on-failure will retry on transient errors (e.g. DNS)
-    success = asyncio.run(start_gateway(config))
+    try:
+        success = asyncio.run(start_gateway(config, daemon=args.daemon))
+    finally:
+        # Clean up temp config file if we created one
+        if _temp_config_path and os.path.exists(_temp_config_path):
+            try:
+                os.unlink(_temp_config_path)
+            except Exception:
+                pass
     if not success:
         sys.exit(1)
 

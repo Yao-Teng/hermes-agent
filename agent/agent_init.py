@@ -901,25 +901,25 @@ def init_agent(
         agent.base_url = client_kwargs.get("base_url", agent.base_url)
         try:
             agent.client = agent._create_openai_client(client_kwargs, reason="agent_init", shared=True)
-            if not agent.quiet_mode:
-                print(f"🤖 AI Agent initialized with model: {agent.model}")
-                if base_url:
-                    print(f"🔗 Using custom base URL: {base_url}")
-                # ``api_key`` may be a callable Entra ID bearer
-                # provider (Azure Foundry). The OpenAI SDK mints a
-                # fresh JWT per request internally — the banner
-                # never invokes or inspects the callable.
-                from agent.azure_identity_adapter import is_token_provider
-
-                key_used = client_kwargs.get("api_key", "none")
-                if is_token_provider(key_used):
-                    print("🔑 Using credentials: Microsoft Entra ID")
-                elif isinstance(key_used, str) and key_used and key_used != "dummy-key" and len(key_used) > 12:
-                    print(f"🔑 Using API key: {key_used[:8]}...{key_used[-4:]}")
-                else:
-                    print("⚠️  Warning: API key appears invalid or missing")
         except Exception as e:
             raise RuntimeError(f"Failed to initialize OpenAI client: {e}")
+        if not agent.quiet_mode:
+            print(f"🤖 AI Agent initialized with model: {agent.model}")
+            if base_url:
+                print(f"🔗 Using custom base URL: {base_url}")
+            # ``api_key`` may be a callable Entra ID bearer
+            # provider (Azure Foundry). The OpenAI SDK mints a
+            # fresh JWT per request internally — the banner
+            # never invokes or inspects the callable.
+            from agent.azure_identity_adapter import is_token_provider
+
+            key_used = client_kwargs.get("api_key", "none")
+            if is_token_provider(key_used):
+                print("🔑 Using credentials: Microsoft Entra ID")
+            elif isinstance(key_used, str) and key_used and key_used != "dummy-key" and len(key_used) > 12:
+                print(f"🔑 Using API key: {key_used[:8]}...{key_used[-4:]}")
+            else:
+                print("⚠️  Warning: API key appears invalid or missing")
     
     # Provider fallback chain — ordered list of backup providers tried
     # when the primary is exhausted (rate-limit, overload, connection
@@ -1598,6 +1598,7 @@ def init_agent(
     agent.session_cost_source = "none"
     
     # ── Ollama num_ctx injection ──
+    _ra().logger.info("agent_init: _model_cfg=%s", dict(_model_cfg) if isinstance(_model_cfg, dict) else _model_cfg)
     # Ollama defaults to 2048 context regardless of the model's capabilities.
     # When running against an Ollama server, detect the model's max context
     # and pass num_ctx on every chat request so the full window is used.

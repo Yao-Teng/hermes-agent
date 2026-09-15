@@ -1857,11 +1857,18 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         role = "assistant"
         reasoning_parts: list = []
         usage_obj = None
+
+        # Ensure stream is iterable. If the provider returns a single response
+        # instead of a generator (e.g. due to a fallback or error), we must
+        # raise a TypeError to trigger the outer error-handling/recovery loop.
+        import collections.abc
+        if not isinstance(stream, collections.abc.Iterable):
+            raise TypeError(f"Expected an iterable stream, but got {type(stream).__name__}")
+
         for chunk in stream:
             last_chunk_time["t"] = time.time()
             agent._touch_activity("receiving stream response")
 
-            # Update per-attempt diagnostic counters.  Best-effort —
             # failures are swallowed so the streaming hot path is never
             # interrupted by diagnostic accounting.
             try:
